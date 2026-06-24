@@ -1,6 +1,6 @@
 # Dokploy Skill for Claude Code
 
-A Claude Code skill for managing [Dokploy](https://dokploy.com) deployments via API.
+A Claude Code skill for managing [Dokploy](https://dokploy.com) deployments via the API — deploy services, manage projects, domains, databases and volumes.
 
 ## Installation
 
