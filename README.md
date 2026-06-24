@@ -7,7 +7,7 @@ A Claude Code skill for managing [Dokploy](https://dokploy.com) deployments via 
 1. Clone this repo into your Claude Code skills directory:
 
 ````bash
-git clone https://github.com/ThendCN/dokploy-skill.git ~/.claude/skills/dokploy
+git clone https://github.com/adrianoruiz/dokploy-skill.git ~/.claude/skills/dokploy
 ````
 
 2. Initialize your server configuration:

@@ -4,11 +4,12 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
-// 配置文件路径
+// Config file path
 const CONFIG_PATH = path.join(os.homedir(), '.config', 'dokploy-skill', 'config.json');
 
-// 加载配置文件
+// Load config file
 function loadConfig() {
   try {
     if (!fs.existsSync(CONFIG_PATH)) {
@@ -17,12 +18,12 @@ function loadConfig() {
     const content = fs.readFileSync(CONFIG_PATH, 'utf8');
     return JSON.parse(content);
   } catch (e) {
-    console.error(`配置文件加载失败: ${e.message}`);
+    console.error(`Failed to load config: ${e.message}`);
     return null;
   }
 }
 
-// 解析 --server 参数
+// Parse the --server argument
 function parseServerArg() {
   const serverArg = process.argv.find(arg => arg.startsWith('--server='));
   if (serverArg) {
@@ -31,10 +32,15 @@ function parseServerArg() {
   return process.env.DOKPLOY_SERVER || null;
 }
 
-// 脱敏显示 key
+// Mask an API key for display
 function maskKey(key) {
   if (!key || key.length < 9) return '***';
   return key.slice(0, 3) + '...' + key.slice(-5);
+}
+
+// Generate a cryptographically strong password
+function genPass() {
+  return crypto.randomBytes(18).toString('base64url');
 }
 
 async function trpc(endpoint, method = 'GET', body = null) {
@@ -54,10 +60,25 @@ async function trpc(endpoint, method = 'GET', body = null) {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
+        let json;
         try {
-          const json = JSON.parse(data);
-          resolve(json.result?.data?.json || json);
-        } catch { resolve(data); }
+          json = JSON.parse(data);
+        } catch {
+          // Non-JSON body: treat any non-2xx as an error
+          if (res.statusCode >= 400) {
+            return reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 300)}`));
+          }
+          return resolve(data);
+        }
+        // tRPC surfaces failures in an `error` field even with a 200 body
+        if (json.error) {
+          const msg = json.error?.json?.message || json.error?.message || JSON.stringify(json.error);
+          return reject(new Error(msg));
+        }
+        if (res.statusCode >= 400) {
+          return reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 300)}`));
+        }
+        resolve(json.result?.data?.json ?? json);
       });
     });
     req.on('error', reject);
@@ -66,12 +87,12 @@ async function trpc(endpoint, method = 'GET', body = null) {
   });
 }
 
-// 全局 CONFIG 变量，在 main 中初始化
+// Global CONFIG, initialized in main()
 let CONFIG = null;
 
 const actions = {
   async init() {
-    // 解析参数
+    // Parse arguments
     const args = process.argv.slice(2);
     let name = null, url = null, key = null, gitProxy = null, defaultServer = null;
 
@@ -83,80 +104,80 @@ const actions = {
       else if (arg.startsWith('--default=')) defaultServer = arg.split('=')[1];
     }
 
-    // 读取现有配置
+    // Load existing config
     let config = loadConfig() || { servers: {} };
 
-    // 添加/更新服务器
+    // Add/update a server
     if (name && url && key) {
       config.servers[name] = { url, apiKey: key };
-      // 如果是第一个服务器，设为默认
+      // First server becomes the default
       if (!config.defaultServer) {
         config.defaultServer = name;
       }
-      console.log(`服务器 ${name} 已配置`);
+      console.log(`Server "${name}" configured`);
     }
 
-    // 设置 Git 代理
+    // Set the Git proxy
     if (gitProxy) {
       config.gitProxy = gitProxy;
-      console.log('Git 代理已配置');
+      console.log('Git proxy configured');
     }
 
-    // 设置默认服务器
+    // Set the default server
     if (defaultServer) {
       if (config.servers[defaultServer]) {
         config.defaultServer = defaultServer;
-        console.log(`默认服务器已设置为: ${defaultServer}`);
+        console.log(`Default server set to: ${defaultServer}`);
       } else {
-        console.error(`服务器 ${defaultServer} 不存在`);
+        console.error(`Server "${defaultServer}" does not exist`);
         process.exit(1);
       }
     }
 
-    // 创建目录
+    // Create the config directory
     const configDir = path.dirname(CONFIG_PATH);
     if (!fs.existsSync(configDir)) {
       fs.mkdirSync(configDir, { recursive: true });
     }
 
-    // 写入配置文件
+    // Write the config file
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), { mode: 0o600 });
-    console.log(`配置已保存到: ${CONFIG_PATH}`);
+    console.log(`Config saved to: ${CONFIG_PATH}`);
   },
 
   async config() {
     const config = loadConfig();
     if (!config) {
-      console.log('未找到配置文件');
+      console.log('No config file found');
       return;
     }
 
-    console.log('\n=== Dokploy 配置 ===\n');
+    console.log('\n=== Dokploy config ===\n');
 
     if (config.servers && Object.keys(config.servers).length > 0) {
       for (const [name, server] of Object.entries(config.servers)) {
         const isDefault = name === config.defaultServer;
-        console.log(`服务器: ${name} (${server.url})${isDefault ? ' [默认]' : ''}`);
-        console.log(`         API Key: ${maskKey(server.apiKey)}`);
+        console.log(`Server: ${name} (${server.url})${isDefault ? ' [default]' : ''}`);
+        console.log(`        API key: ${maskKey(server.apiKey)}`);
         if (server.useGitProxy) {
-          console.log(`         使用 Git 代理`);
+          console.log(`        uses Git proxy`);
         }
       }
     } else {
-      console.log('未配置服务器');
+      console.log('No servers configured');
     }
 
     if (config.gitProxy) {
-      console.log('\nGit 代理: 已配置');
+      console.log('\nGit proxy: configured');
     }
   },
 
   async list() {
     const projects = await trpc('project.all', 'GET');
-    console.log('\n=== 项目列表 ===\n');
+    console.log('\n=== Projects ===\n');
     for (const p of projects || []) {
       console.log(`[${p.projectId}] ${p.name}`);
-      // 获取每个项目的详细信息
+      // Walk each project's environments
       const envs = p.environments || [];
       for (const env of envs) {
         if (env.compose?.length) {
@@ -169,80 +190,80 @@ const actions = {
   },
 
   async status(composeId) {
-    if (!composeId) return console.error('用法: status <composeId>');
+    if (!composeId) return console.error('Usage: status <composeId>');
     const data = await trpc('compose.one', 'GET', { composeId });
-    console.log('\n=== Compose 状态 ===');
-    console.log(`名称: ${data.name}`);
+    console.log('\n=== Compose status ===');
+    console.log(`Name: ${data.name}`);
     console.log(`appName: ${data.appName}`);
-    console.log(`状态: ${data.composeStatus}`);
-    console.log(`类型: ${data.composeType}`);
-    console.log(`源: ${data.sourceType}`);
+    console.log(`Status: ${data.composeStatus}`);
+    console.log(`Type: ${data.composeType}`);
+    console.log(`Source: ${data.sourceType}`);
     if (data.customGitUrl) console.log(`Git: ${data.customGitUrl} (${data.customGitBranch})`);
     if (data.domains?.length) {
-      console.log('\n域名配置:');
+      console.log('\nDomains:');
       for (const d of data.domains) {
         console.log(`  - ${d.host}:${d.port} -> serviceName: "${d.serviceName || ''}" [${d.domainId}]`);
       }
     }
     if (data.composeFile) {
-      console.log('\nCompose 文件内容:');
+      console.log('\nCompose file:');
       console.log(data.composeFile);
     }
   },
 
   async deploy(composeId) {
-    if (!composeId) return console.error('用法: deploy <composeId>');
+    if (!composeId) return console.error('Usage: deploy <composeId>');
     await trpc('compose.deploy', 'POST', { composeId });
-    console.log(`部署已触发: ${composeId}`);
+    console.log(`Deployment triggered: ${composeId}`);
   },
 
   async stop(composeId) {
-    if (!composeId) return console.error('用法: stop <composeId>');
+    if (!composeId) return console.error('Usage: stop <composeId>');
     await trpc('compose.stop', 'POST', { composeId });
-    console.log(`已停止: ${composeId}`);
+    console.log(`Stopped: ${composeId}`);
   },
 
   async start(composeId) {
-    if (!composeId) return console.error('用法: start <composeId>');
+    if (!composeId) return console.error('Usage: start <composeId>');
     await trpc('compose.start', 'POST', { composeId });
-    console.log(`已启动: ${composeId}`);
+    console.log(`Started: ${composeId}`);
   },
 
   async logs(composeId) {
-    if (!composeId) return console.error('用法: logs <composeId>');
+    if (!composeId) return console.error('Usage: logs <composeId>');
     const data = await trpc('deployment.allByCompose', 'GET', { composeId });
-    console.log('\n=== 部署记录 ===\n');
+    console.log('\n=== Deployments ===\n');
     for (const d of (data || []).slice(0, 10)) {
       console.log(`[${d.deploymentId}] ${d.status} - ${new Date(d.createdAt).toLocaleString()}`);
     }
   },
 
   async 'deployment-log'(deploymentId) {
-    if (!deploymentId) return console.error('用法: deployment-log <deploymentId>');
+    if (!deploymentId) return console.error('Usage: deployment-log <deploymentId>');
     const data = await trpc('deployment.one', 'GET', { deploymentId });
     console.log(JSON.stringify(data, null, 2));
   },
 
   async 'create-project'(name, description = '') {
-    if (!name) return console.error('用法: create-project <name> [description]');
+    if (!name) return console.error('Usage: create-project <name> [description]');
     const data = await trpc('project.create', 'POST', { name, description });
-    console.log(`项目已创建:`);
+    console.log(`Project created:`);
     console.log(`  projectId: ${data.projectId}`);
     console.log(`  environmentId: ${data.environment?.environmentId}`);
   },
 
   async 'create-compose'(name, environmentId) {
-    if (!name || !environmentId) return console.error('用法: create-compose <name> <environmentId>');
+    if (!name || !environmentId) return console.error('Usage: create-compose <name> <environmentId>');
     const data = await trpc('compose.create', 'POST', {
       name, environmentId, composeType: 'docker-compose'
     });
-    console.log(`Compose 已创建:`);
+    console.log(`Compose created:`);
     console.log(`  composeId: ${data.composeId}`);
   },
 
   async 'setup-git'(composeId, repoPath, branch = 'main') {
-    if (!composeId || !repoPath) return console.error('用法: setup-git <composeId> <owner/repo> [branch]');
-    // 根据服务器配置决定是否使用代理
+    if (!composeId || !repoPath) return console.error('Usage: setup-git <composeId> <owner/repo> [branch]');
+    // Use the proxy only if the server is configured for it
     const repoUrl = CONFIG.useGitProxy && CONFIG.gitProxy
       ? `${CONFIG.gitProxy}/${repoPath}.git`
       : `https://github.com/${repoPath}.git`;
@@ -253,34 +274,34 @@ const actions = {
       customGitBranch: branch,
       composePath: './docker-compose.yml'
     });
-    console.log(`Git 仓库已配置: ${repoPath} (${branch})`);
+    console.log(`Git repo configured: ${repoPath} (${branch})`);
     console.log(`  URL: ${repoUrl}`);
-    if (CONFIG.useGitProxy) console.log(`  (使用代理)`);
+    if (CONFIG.useGitProxy) console.log(`  (using proxy)`);
   },
 
   async 'set-raw-compose'(composeId, composeFile) {
-    if (!composeId || !composeFile) return console.error('用法: set-raw-compose <composeId> <composeFile>');
+    if (!composeId || !composeFile) return console.error('Usage: set-raw-compose <composeId> <composeFile>');
     const content = fs.readFileSync(composeFile, 'utf8');
     await trpc('compose.update', 'POST', {
       composeId,
       sourceType: 'raw',
       composeFile: content
     });
-    console.log(`Raw Compose 已设置: ${composeId}`);
+    console.log(`Raw compose set: ${composeId}`);
   },
 
   async 'add-domain'(composeId, host, port, serviceName = '') {
-    if (!composeId || !host || !port) return console.error('用法: add-domain <composeId> <host> <port> [serviceName]');
+    if (!composeId || !host || !port) return console.error('Usage: add-domain <composeId> <host> <port> [serviceName]');
     const body = { host, port: parseInt(port), composeId };
     if (serviceName) body.serviceName = serviceName;
     const data = await trpc('domain.create', 'POST', body);
-    console.log(`域名已添加:`);
+    console.log(`Domain added:`);
     console.log(`  domainId: ${data.domainId}`);
     console.log(`  host: ${host}`);
   },
 
   async 'enable-ssl'(domainId) {
-    if (!domainId) return console.error('用法: enable-ssl <domainId>');
+    if (!domainId) return console.error('Usage: enable-ssl <domainId>');
     const domain = await trpc('domain.one', 'GET', { domainId });
     await trpc('domain.update', 'POST', {
       domainId,
@@ -289,17 +310,17 @@ const actions = {
       https: true,
       certificateType: 'letsencrypt'
     });
-    console.log(`SSL 已启用: ${domain.host}`);
+    console.log(`SSL enabled: ${domain.host}`);
   },
 
   async 'delete-domain'(domainId) {
-    if (!domainId) return console.error('用法: delete-domain <domainId>');
+    if (!domainId) return console.error('Usage: delete-domain <domainId>');
     await trpc('domain.delete', 'POST', { domainId });
-    console.log(`域名已删除: ${domainId}`);
+    console.log(`Domain deleted: ${domainId}`);
   },
 
   async 'update-domain'(domainId, serviceName) {
-    if (!domainId) return console.error('用法: update-domain <domainId> <serviceName>');
+    if (!domainId) return console.error('Usage: update-domain <domainId> <serviceName>');
     const domain = await trpc('domain.one', 'GET', { domainId });
     await trpc('domain.update', 'POST', {
       domainId,
@@ -309,15 +330,14 @@ const actions = {
       certificateType: domain.certificateType,
       serviceName: serviceName || ''
     });
-    console.log(`域名已更新: ${domain.host}, serviceName: ${serviceName || '(空)'}`);
+    console.log(`Domain updated: ${domain.host}, serviceName: ${serviceName || '(empty)'}`);
   },
 
   async 'create-mysql'(name, environmentId, dbName, dbUser, dbPass, rootPass) {
     if (!name || !environmentId || !dbName || !dbUser) {
-      return console.error('用法: create-mysql <name> <environmentId> <dbName> <dbUser> [dbPass] [rootPass]');
+      return console.error('Usage: create-mysql <name> <environmentId> <dbName> <dbUser> [dbPass] [rootPass]');
     }
-    // 生成随机密码
-    const genPass = () => Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+    // Generate strong passwords when not provided
     dbPass = dbPass || genPass();
     rootPass = rootPass || genPass();
 
@@ -332,38 +352,38 @@ const actions = {
       dockerImage: 'mysql:8'
     });
 
-    console.log(`MySQL 已创建:`);
+    console.log(`MySQL created:`);
     console.log(`  mysqlId: ${data.mysqlId}`);
     console.log(`  appName: ${data.appName}`);
-    console.log(`  数据库: ${dbName}`);
-    console.log(`  用户: ${dbUser}`);
-    console.log(`  密码: ${dbPass}`);
-    console.log(`  Root密码: ${rootPass}`);
-    console.log(`\n连接信息 (docker-compose 内部):`);
+    console.log(`  database: ${dbName}`);
+    console.log(`  user: ${dbUser}`);
+    console.log(`  password: ${dbPass}`);
+    console.log(`  root password: ${rootPass}`);
+    console.log(`\nConnection info (inside docker-compose):`);
     console.log(`  HOST: ${data.appName}`);
     console.log(`  PORT: 3306`);
   },
 
   async 'deploy-mysql'(mysqlId) {
-    if (!mysqlId) return console.error('用法: deploy-mysql <mysqlId>');
+    if (!mysqlId) return console.error('Usage: deploy-mysql <mysqlId>');
     await trpc('mysql.deploy', 'POST', { mysqlId });
-    console.log(`MySQL 部署已触发: ${mysqlId}`);
+    console.log(`MySQL deployment triggered: ${mysqlId}`);
   },
 
   async 'mysql-status'(mysqlId) {
-    if (!mysqlId) return console.error('用法: mysql-status <mysqlId>');
+    if (!mysqlId) return console.error('Usage: mysql-status <mysqlId>');
     const data = await trpc('mysql.one', 'GET', { mysqlId });
-    console.log('\n=== MySQL 状态 ===');
-    console.log(`名称: ${data.name}`);
-    console.log(`状态: ${data.applicationStatus}`);
-    console.log(`数据库: ${data.databaseName}`);
-    console.log(`用户: ${data.databaseUser}`);
-    console.log(`内部主机: ${data.appName}`);
+    console.log('\n=== MySQL status ===');
+    console.log(`Name: ${data.name}`);
+    console.log(`Status: ${data.applicationStatus}`);
+    console.log(`Database: ${data.databaseName}`);
+    console.log(`User: ${data.databaseUser}`);
+    console.log(`Internal host: ${data.appName}`);
   },
 
   async 'create-volume'(serviceId, volumeName, mountPath, serviceType = 'compose') {
     if (!serviceId || !volumeName || !mountPath) {
-      return console.error('用法: create-volume <serviceId> <volumeName> <mountPath> [serviceType]');
+      return console.error('Usage: create-volume <serviceId> <volumeName> <mountPath> [serviceType]');
     }
     const data = await trpc('mounts.create', 'POST', {
       type: 'volume',
@@ -372,7 +392,7 @@ const actions = {
       serviceId,
       serviceType
     });
-    console.log(`Volume 已创建:`);
+    console.log(`Volume created:`);
     console.log(`  mountId: ${data.mountId}`);
     console.log(`  volumeName: ${volumeName}`);
     console.log(`  mountPath: ${mountPath}`);
@@ -380,7 +400,7 @@ const actions = {
 
   async 'create-bind'(serviceId, hostPath, mountPath, serviceType = 'compose') {
     if (!serviceId || !hostPath || !mountPath) {
-      return console.error('用法: create-bind <serviceId> <hostPath> <mountPath> [serviceType]');
+      return console.error('Usage: create-bind <serviceId> <hostPath> <mountPath> [serviceType]');
     }
     const data = await trpc('mounts.create', 'POST', {
       type: 'bind',
@@ -389,22 +409,22 @@ const actions = {
       serviceId,
       serviceType
     });
-    console.log(`Bind Mount 已创建:`);
+    console.log(`Bind mount created:`);
     console.log(`  mountId: ${data.mountId}`);
     console.log(`  hostPath: ${hostPath}`);
     console.log(`  mountPath: ${mountPath}`);
   },
 
   async 'list-mounts'(composeId) {
-    if (!composeId) return console.error('用法: list-mounts <composeId>');
+    if (!composeId) return console.error('Usage: list-mounts <composeId>');
     const data = await trpc('compose.loadMountsByService', 'GET', { composeId });
-    console.log('\n=== Mounts 列表 ===\n');
+    console.log('\n=== Mounts ===\n');
     if (!data || Object.keys(data).length === 0) {
-      console.log('暂无挂载');
+      console.log('No mounts');
       return;
     }
     for (const [service, mounts] of Object.entries(data)) {
-      console.log(`服务: ${service}`);
+      console.log(`Service: ${service}`);
       for (const m of mounts) {
         console.log(`  [${m.mountId}] ${m.type}: ${m.hostPath || m.volumeName} -> ${m.mountPath}`);
       }
@@ -413,43 +433,43 @@ const actions = {
 };
 
 async function main() {
-  // 过滤掉 --server 参数
+  // Strip the --server argument out
   const args = process.argv.slice(2).filter(arg => !arg.startsWith('--server='));
   const [action = 'list', ...actionArgs] = args;
 
-  // init 和 config 命令不需要加载服务器配置
+  // init and config do not need a server config loaded
   if (action === 'init' || action === 'config') {
     const fn = actions[action];
     if (fn) {
       try {
         await fn(...actionArgs);
       } catch (e) {
-        console.error('错误:', e.message);
+        console.error('Error:', e.message);
         process.exit(1);
       }
     }
     return;
   }
 
-  // 其他命令需要加载配置
+  // Every other command needs a config
   const config = loadConfig();
   if (!config || !config.servers || Object.keys(config.servers).length === 0) {
-    console.error('未找到配置文件。请先运行 init 命令配置服务器:');
+    console.error('No config file found. Run init first to configure a server:');
     console.error('node dokploy.js init --name=myserver --url=https://your-server.com --key=your-api-key');
     process.exit(1);
   }
 
-  // 解析服务器参数
+  // Resolve which server to use
   const serverName = parseServerArg() || config.defaultServer;
   const serverConfig = config.servers[serverName];
 
   if (!serverConfig) {
-    console.error(`未知服务器: ${serverName}`);
-    console.log('可用服务器: ' + Object.keys(config.servers).join(', '));
+    console.error(`Unknown server: ${serverName}`);
+    console.log('Available servers: ' + Object.keys(config.servers).join(', '));
     process.exit(1);
   }
 
-  // 设置全局 CONFIG
+  // Set the global CONFIG
   CONFIG = {
     url: serverConfig.url,
     apiKey: serverConfig.apiKey,
@@ -459,16 +479,16 @@ async function main() {
 
   const fn = actions[action];
   if (!fn) {
-    console.error(`未知操作: ${action}`);
-    console.log('可用操作: ' + Object.keys(actions).join(', '));
-    console.log(`当前服务器: ${serverName} (${CONFIG.url})`);
+    console.error(`Unknown action: ${action}`);
+    console.log('Available actions: ' + Object.keys(actions).join(', '));
+    console.log(`Current server: ${serverName} (${CONFIG.url})`);
     process.exit(1);
   }
 
   try {
     await fn(...actionArgs);
   } catch (e) {
-    console.error('错误:', e.message);
+    console.error('Error:', e.message);
     process.exit(1);
   }
 }
